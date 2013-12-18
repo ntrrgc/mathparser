@@ -1,0 +1,138 @@
+%skeleton "lalr1.cc"
+%defines
+
+%pure-parser
+
+%define parser_class_name "MathParser"
+
+%code requires {
+#include <string>
+#include "ast/ast.hpp"
+class MathDriver;
+}
+
+%parse-param { MathDriver& driver }
+%parse-param { void * yyscanner}
+%lex-param { MathDriver& driver }
+%lex-param { void * yyscanner }
+
+%locations
+
+%error-verbose
+
+%union {
+    ast::Node * node;
+    double numvalue;
+    std::string * strvalue;
+    std::vector<std::unique_ptr<ast::Node> > * parameters;
+};
+
+%code {
+#include "MathDriver.hpp"
+#include <vector>
+#include <utility>
+#include <sstream>
+using namespace ast;
+using namespace std;
+}
+
+%token END 0 "end of expression"
+%token NUM "number"
+%token ID "identifier"
+%left '-' '+'
+%left '*' '/'
+%left NEG
+%left POS
+%right '^'
+
+%type <node> exp
+%type <numvalue> NUM
+%type <strvalue> ID
+%type <parameters> params
+%type <parameters> params_not_null
+
+%printer { yyoutput << *$$; } "identifier"
+%destructor { delete $$; } exp
+
+%printer { yyoutput << $$; } <numvalue>
+
+%%
+%start main_exp;
+
+main_exp:
+  exp { driver.result = shared_ptr<Node>($1); }
+
+exp:
+  NUM               { $$ = new NumberConstant($1); }
+| ID                {
+      auto cte_ref = driver.constants->find(*$1);
+      if (cte_ref != driver.constants->end()) {
+          $$ = new NumberConstant(cte_ref->second);
+      } else {
+          auto var_ref = driver.allowedVariableNames->find(*$1);
+          if (var_ref != driver.allowedVariableNames->end()) {
+              $$ = new Variable(*$1);
+          } else {
+              $$ = new ast::Error;
+              error(yylloc, string("Unknown variable or constant: ")+*$1);
+          }
+      }
+      delete $1;
+  }
+| ID '(' params ')' {
+      auto fun_ref = driver.functions->find(*$1);
+      if (fun_ref != driver.functions->end()) {
+          unsigned int nargs = $3->size();
+          const Function * function = &fun_ref->second;
+          if (nargs >= function->minArguments &&
+                  nargs <= function->maxArguments)
+          {
+              $$ = new FunctionCall(*$1, *function, std::move(*$3));
+          } else {
+              $$ = new ast::Error;
+
+              stringstream errorstr;
+              errorstr << "Invalid number of parameters. Read " << nargs
+                       << ", expected between " << function->minArguments
+                       << " and " << function->maxArguments << ".";
+              error(yylloc, errorstr.str());
+          }
+      } else {
+          $$ = new ast::Error;
+          error(yylloc, string("Unknown function: ")+*$1);
+      }
+      delete $1; delete $3;
+  }
+| exp '+' exp       { $$ = new Sum(unique_ptr<Node>($1), unique_ptr<Node>($3)); }
+| exp '-' exp       { $$ = new Subtract(unique_ptr<Node>($1), unique_ptr<Node>($3)); }
+| exp '*' exp       { $$ = new Multiplication(unique_ptr<Node>($1), unique_ptr<Node>($3)); }
+| exp '/' exp       { $$ = new Division(unique_ptr<Node>($1), unique_ptr<Node>($3)); }
+| '+' exp %prec POS { $$ = $2; }
+| '-' exp %prec NEG { $$ = new UnaryMinus(unique_ptr<Node>($2)); }
+| exp '^' exp       { $$ = new Exponentiation(unique_ptr<Node>($1), unique_ptr<Node>($3)); }
+| '(' exp ')'       { $$ = $2; }
+;
+
+params:
+/* empty */ { $$ = new vector<unique_ptr<Node> >; }
+| params_not_null { $$ = $1; }
+
+params_not_null:
+  exp               {
+    $$ = new vector<unique_ptr<Node> >;
+    $$->push_back(unique_ptr<Node>($1));
+                    }
+| params_not_null ',' exp {
+    $$ = $1;
+    $$->push_back(unique_ptr<Node>($3));
+                          }
+
+%%
+
+void
+yy::MathParser::error (const yy::MathParser::location_type& l,
+                       const std::string& m)
+{
+    driver.error(l,m);
+    driver.errorBit = true;
+}
